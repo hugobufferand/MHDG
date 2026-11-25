@@ -5,7 +5,37 @@ MODULE domain_decomposition_module
   USE preprocess, ONLY: GetFaces_mod
   IMPLICIT NONE
 
+  ! Partitioning methods (divType argument of split_mesh)
+  !   1, 2, 3 : geometric strips (radial / X / Y), rotated 5 deg until valid
+  !   4       : graph partitioning of the element connectivity with SCOTCH
+  !             (falls back to Y strips if SCOTCH is unavailable or fails)
+  INTEGER, PARAMETER :: DD_STRIPS_Y = 3
+  INTEGER, PARAMETER :: DD_SCOTCH   = 4
+
 CONTAINS
+
+  !> Partitioning method to use: SCOTCH when compiled with -DWITH_SCOTCH,
+  !> geometric Y strips otherwise. The environment variable
+  !> MHDG_PARTITIONER=strips|scotch overrides the default at run time.
+  INTEGER FUNCTION default_partition_type() RESULT(divtype)
+    CHARACTER(LEN=32) :: env
+    INTEGER           :: env_len, env_status
+
+#ifdef WITH_SCOTCH
+    divtype = DD_SCOTCH
+#else
+    divtype = DD_STRIPS_Y
+#endif
+    CALL GET_ENVIRONMENT_VARIABLE('MHDG_PARTITIONER', env, env_len, env_status)
+    IF (env_status .EQ. 0 .AND. env_len .GT. 0) THEN
+       SELECT CASE (TRIM(ADJUSTL(env)))
+       CASE ('strips', 'STRIPS')
+          divtype = DD_STRIPS_Y
+       CASE ('scotch', 'SCOTCH')
+          divtype = DD_SCOTCH
+       END SELECT
+    ENDIF
+  END FUNCTION default_partition_type
 
 
   SUBROUTINE split_mesh(ndiv, divtype, verbose)
@@ -41,8 +71,13 @@ CONTAINS
     REAL*8, ALLOCATABLE                     :: xb(:), yb(:), thetab(:), theta(:)
     LOGICAL                                 :: redo, check
     REAL*8                                  :: RotMat(2,2)
+    ! partition of the global elements (1..nDiv) and face ownership
+    INTEGER, ALLOCATABLE                    :: part(:), tbidx(:)
+    INTEGER                                 :: dtype, owner, gfa, nbal
+    LOGICAL                                 :: part_ok
 
     NULLIFY(intfaces_glob, extfaces_glob, T, TTb, boundaryFlag, X)
+    dtype = divType
 
     IF(MPIvar%glob_id .EQ. 0) THEN
        WRITE(*,*) "*************************************************"
@@ -114,14 +149,34 @@ CONTAINS
     indgh = 0
     ind = .FALSE.
 
+    ALLOCATE(part(Nelems))
+    part = 0
+    IF (dtype .EQ. DD_SCOTCH) THEN
+       CALL graph_partition(nDiv, Nelems, intfaces_glob, part, part_ok)
+       IF (.NOT. part_ok) THEN
+          IF (MPIvar%glob_id .EQ. 0) THEN
+             WRITE(*,*) "Graph partitioning unavailable or failed: using Y strips."
+          ENDIF
+          dtype = DD_STRIPS_Y
+       ENDIF
+    ENDIF
+
     ! keep on rotating the mesh if no good partition is found
     DO WHILE(redo)
 
        CALL MPI_BARRIER(MPI_COMM_WORLD, ierr)
 
-
-       IF(MPIvar%glob_id .EQ. 0) THEN
-          WRITE(*,*) "Angle of rotation: ", angle
+       IF (dtype .NE. DD_SCOTCH) THEN
+          IF (angle .GE. 360.) THEN
+             IF(MPIvar%glob_id .EQ. 0) THEN
+                WRITE(*,*) "Domain decomposition: no valid strip partition found for any rotation."
+                WRITE(*,*) "Use fewer MPI processes or the SCOTCH graph partitioner. STOP."
+             ENDIF
+             CALL MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+          ENDIF
+          IF(MPIvar%glob_id .EQ. 0) THEN
+             WRITE(*,*) "Angle of rotation: ", angle
+          ENDIF
        ENDIF
 
 
@@ -141,7 +196,9 @@ CONTAINS
           yb(iel) = SUM(X(T(iel,1:Nvert),2))/REAL(Nvert)
        ENDDO
 
-       SELECT CASE (divType)
+       SELECT CASE (dtype)
+       CASE (DD_SCOTCH)
+          ! partition already computed by graph_partition
        CASE (1)
           ! Radial division
           DO iel = 1,Nelems
@@ -170,9 +227,14 @@ CONTAINS
 
        ! !***** Division Loop->ndiv-1 *****!
        !
+       IF (dtype .EQ. DD_SCOTCH) THEN
+          redo = .FALSE.
+       ELSE
 
+       nbal = 0
        DO WHILE(redo)
 
+          nbal = nbal + 1
           redo = .FALSE.
           Nel_tot = 0
           Nel_loc = 0
@@ -208,6 +270,7 @@ CONTAINS
              ENDIF
              Nel_tot = Nel_tot + Nel_loc
           ENDDO
+          IF (redo .AND. nbal .GE. 10) EXIT   ! give up this angle, rotate below
        ENDDO
 
        Nel_tot = 0
@@ -242,8 +305,27 @@ CONTAINS
 #endif
 
        IF(redo) THEN
-          EXIT
+          ! no balanced strip cut: rotate the mesh by 5 deg and retry
+          X(:,1) = X(:,1) - xcenter
+          X(:,2) = X(:,2) - ycenter
+          RotMat(1,1) = COS(5.*pi_loc/180.)
+          RotMat(1,2) = -SIN(5.*pi_loc/180.)
+          RotMat(2,1) = SIN(5.*pi_loc/180.)
+          RotMat(2,2) = COS(5.*pi_loc/180.)
+          X = TRANSPOSE(MATMUL(RotMat,TRANSPOSE(X)))
+          X(:,1) = X(:,1) + xcenter
+          X(:,2) = X(:,2) + ycenter
+          angle = angle + 5.
+          CYCLE
        ENDIF
+
+       ! strip index of each element (all elements are strictly inside a strip here)
+       part = 0
+       DO it = 1, nDiv
+          WHERE ((thetab .GT. theta(it)) .AND. (thetab .LT. theta(it+1))) part = it
+       ENDDO
+
+       ENDIF ! strips
 
        CALL MPI_BARRIER(MPI_COMM_WORLD, ierr)
 
@@ -256,7 +338,7 @@ CONTAINS
                 WRITE(*,*) "Division: ", it
              ENDIF
 
-             ALLOCATE(loc2glob_el(COUNT((thetab .GT. theta(it)) .AND. (thetab .LT. theta(it+1)))))
+             ALLOCATE(loc2glob_el(COUNT(part .EQ. it)))
              loc2glob_el = 0
              Tb_sizes = 0
 
@@ -264,8 +346,8 @@ CONTAINS
              ind = .FALSE.
 
              counter = 1
-             DO i = 1, SIZE(thetab)
-                IF((thetab(i) .GT. theta(it)) .AND. (thetab(i) .LT. theta(it+1))) THEN
+             DO i = 1, Nelems
+                IF(part(i) .EQ. it) THEN
                    loc2glob_el(counter) = i
                    counter = counter + 1
                    ind(i) = .TRUE.
@@ -315,7 +397,7 @@ CONTAINS
 
                 counter = 1
                 DO i = 1, SIZE(ghel)
-                   IF(thetab(ghel(i)) .GT. theta(it+1)) THEN
+                   IF(part(ghel(i)) .GT. it) THEN
                       counter = counter + 1
                    ENDIF
                 ENDDO
@@ -324,7 +406,7 @@ CONTAINS
                 innext = 0
                 counter = 1
                 DO i = 1, SIZE(ghel)
-                   IF(thetab(ghel(i)) .GT. theta(it+1)) THEN
+                   IF(part(ghel(i)) .GT. it) THEN
                       innext(counter) = i
                       counter = counter + 1
                    ENDIF
@@ -489,12 +571,15 @@ CONTAINS
              DO ib = 1, n_boundaries
                 n = COUNT(boundaryFlag .EQ. unique_boundaryFlag(ib))
                 ALLOCATE(Tb_bound(n, Mesh%Nnodesperface))
+                ALLOCATE(tbidx(n))
                 Tb_bound = 0
+                tbidx = 0
 
                 counter = 1
                 DO i = 1, SIZE(boundaryFlag)
                    IF(boundaryFlag(i) .EQ. unique_boundaryFlag(ib)) THEN
                       Tb_bound(counter,:) = TTb(i, :)
+                      tbidx(counter) = i          ! global boundary face (row of Tb / extfaces)
                       counter = counter + 1
                    ENDIF
                 ENDDO
@@ -505,25 +590,16 @@ CONTAINS
                 counter = 1
 
                 DO ifa = 1, n
-                   IF(ANY(Tprov .EQ. Tb_bound(ifa,1)) .AND. ANY(Tprov .EQ. Tb_bound(ifa,SIZE(Tb_bound,2)))) THEN
+                   ! the boundary face belongs to this division if its element does
+                   ! (rows of Tb and extfaces are aligned, see preprocess)
+                   IF(ind(extfaces_glob(tbidx(ifa),1))) THEN
                       Tbprov_temp(counter,:) = Tb_bound(ifa,:)
                       counter = counter + 1
-
-                      DO j = 1, SIZE(TTb,1)
-                         IF(ALL(TTb(j, :) .EQ. Tb_bound(ifa,:))) THEN
-                            loc2glob_fa(clg+M(it)%Nintfaces) = j+n_int_faces
-                            EXIT
-                         ENDIF
-
-                         IF(j .EQ. SIZE(TTb,1)) THEN
-                            WRITE(*,*) "Problem in the creation of loc2glob_fa. STOP."
-                            STOP
-                         ENDIF
-                      ENDDO
-
+                      loc2glob_fa(clg+M(it)%Nintfaces) = tbidx(ifa)+n_int_faces
                       clg = clg + 1
                    ENDIF
                 ENDDO
+                DEALLOCATE(tbidx)
 
                 Tb_sizes(ib) = counter - 1
 
@@ -878,140 +954,59 @@ CONTAINS
                 ENDIF
              ENDIF
 
-             ALLOCATE(checkFaces(Nfaces))
-             checkFaces = 0
-
+             ! Face ownership. An interior face is assembled by the division that
+             ! owns the lower-numbered of its two elements, a boundary face by the
+             ! division that owns its element. That division always holds every
+             ! element adjacent to the face (its own element, plus the neighbour as a
+             ! ghost since ghosts are taken from higher-numbered divisions). All the
+             ! other occurrences of the face are ghost faces. This replaces the former
+             ! sequential "first division that contains the face" rule, which could
+             ! leave a face unassembled where three or more divisions meet.
 #ifndef PARALL
              DO it = 1, ndiv
 #else
-
                 DO it = MPIvar%glob_id+1, MPIvar%glob_id+1
-
-                   IF(MPIvar%glob_id .NE. 0) THEN
-                      CALL MPI_Recv(checkFaces, Nfaces, MPI_INTEGER, MPIvar%glob_id-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE, ierr)
-                   ENDIF
-
 #endif
                    IF(verbose) THEN
                       WRITE(*,*) "Division: ", it
                    ENDIF
 
-                   ALLOCATE(loc2glob_faces(M(it)%Nintfaces,5))
-                   ALLOCATE(indices(n_int_faces))
-                   indices = 0
-                   loc2glob_faces = 0
-
-                   loc2glob_faces(:,1) = M(it)%loc2glob_el(M(it)%intfaces_loc(:,1))
-                   loc2glob_faces(:,2) = M(it)%intfaces_loc(:,2)
-                   loc2glob_faces(:,3) = M(it)%loc2glob_el(M(it)%intfaces_loc(:,3))
-                   loc2glob_faces(:,4) = M(it)%intfaces_loc(:,4)
-                   loc2glob_faces(:,5) = M(it)%intfaces_loc(:,5)
-
-                   ! interior faces
-                   DO i = 1, n_int_faces
-                      DO j = 1, M(it)%Nintfaces
-                         IF(ALL(intFaces_Glob(i,:) .EQ. loc2glob_faces(j,:))) THEN
-                            indices(i) = j
-                            EXIT
-                         ENDIF
-                      ENDDO
-                   ENDDO
-
-                   DO i = 1, SIZE(indices)
-                      IF(indices(i) .NE. 0) THEN
-                         M(it)%reptFaces(indices(i)) = checkFaces(i)
-                         checkFaces(i) = 1
-                      ENDIF
-                   ENDDO
-
-
-                   DEALLOCATE(loc2glob_faces)
-                   DEALLOCATE(indices)
-                   ALLOCATE(loc2glob_faces(M(it)%NextFaces,2))
-                   ALLOCATE(indices(n_ext_faces))
-                   loc2glob_faces = 0
-                   indices = 0
-
-                   ! what is this 2??
-                   loc2glob_faces(:,1) = M(it)%loc2glob_el(M(it)%extfaces_loc(:,1))
-                   loc2glob_faces(:,2) = M(it)%extfaces_loc(:,2)
-
-                   ! exterior faces
-                   DO i = 1, n_ext_faces
-                      DO j = 1, M(it)%NextFaces
-                         IF(ALL(extFaces_Glob(i,:) .EQ. loc2glob_faces(j,:))) THEN
-                            indices(i) = j
-                            EXIT
-                         ENDIF
-                      ENDDO
-                   ENDDO
-
-
-                   DO i = 1, SIZE(indices)
-                      IF(indices(i) .NE. 0) THEN
-                         M(it)%reptFaces(M(it)%Nintfaces+indices(i)) = checkFaces(n_int_faces+i)
-                         checkFaces(n_int_faces+i) = 1
-                      ENDIF
-                   ENDDO
-
-                   DEALLOCATE(loc2glob_faces)
-                   DEALLOCATE(indices)
-
-                   ALLOCATE(auxext(M(it)%Nextfaces))
-                   auxext = 0
-                   ! Change order in exterior faces
-                   counter = 1
-                   DO i = M(it)%Nintfaces+1,M(it)%Nfaces
-                      auxext(counter) = M(it)%reptFaces(i)
-                      counter = counter + 1
-                   ENDDO
-
-                   counter = 1
-                   DO i = M(it)%Nintfaces+1,M(it)%Nfaces
-                      auxext(M(it)%mapextfa_loc(counter)) = M(it)%reptFaces(i)
-                      counter = counter + 1
-                   ENDDO
-
-                   counter = 1
-                   DO i = M(it)%Nintfaces+1,M(it)%Nfaces
-                      M(it)%reptFaces(i) = auxext(counter)
-                      counter = counter + 1
-                   ENDDO
-
                    DO i = 1, M(it)%Nfaces
-                      IF(M(it)%reptFaces(i) .EQ. 1) THEN
+                      gfa = M(it)%loc2glob_fa(i)
+                      IF (gfa .LE. n_int_faces) THEN
+                         owner = MIN(part(intfaces_glob(gfa,1)), part(intfaces_glob(gfa,3)))
+                      ELSE
+                         owner = part(extfaces_glob(gfa-n_int_faces,1))
+                      ENDIF
+                      ! a face on the border of the local mesh can never be assembled here
+                      IF (M(it)%ghostFaces(i) .EQ. 1 .AND. owner .EQ. it) THEN
+                         WRITE(*,*) "Domain decomposition: inconsistent ownership of face ", gfa, &
+                              " in division ", it, ". STOP."
+                         STOP
+                      ENDIF
+                      IF (owner .NE. it) THEN
+                         M(it)%reptFaces(i)  = 1
                          M(it)%ghostFaces(i) = 1
+                      ELSE
+                         M(it)%reptFaces(i)  = 0
+                         M(it)%ghostFaces(i) = 0
                       ENDIF
                    ENDDO
-
-                   DEALLOCATE(auxext)
 
                    ! count the number of ghost faces
-                   counter = 0
-                   DO i = 1, M(it)%Nfaces
-                      IF (M(it)%ghostFaces(i) .EQ. 1) THEN
-                         counter = counter + 1
-                      ENDIF
-                   ENDDO
+                   counter = COUNT(M(it)%ghostFaces .EQ. 1)
 
+                   ! ghostFlp: flips of the ghost faces in local face order. Only the
+                   ! faces on the border of the local mesh (stored last) can be flipped.
                    ALLOCATE(auxflp(counter))
                    auxflp = 0
-                   ! fix flipFaces dimension
-
                    s = 1
                    DO i = counter - SIZE(M(it)%ghostFlp) + 1, counter
                       auxflp(i) = M(it)%ghostFlp(s)
                       s = s + 1
                    ENDDO
                    M(it)%ghostFlp = auxflp
-
                    DEALLOCATE(auxflp)
-
-#ifdef PARALL
-                   IF(MPIvar%glob_id .NE. nDiv-1) THEN
-                      CALL MPI_Send(checkFaces, Nfaces, MPI_INTEGER, MPIvar%glob_id+1, 0, MPI_COMM_WORLD, ierr)
-                   ENDIF
-#endif
                 ENDDO
 
 
@@ -1088,26 +1083,25 @@ CONTAINS
                             ENDIF
                          ENDDO
 
-                         DO i = 1, nDiv
-                            IF(i .EQ. it) CYCLE
-
-                            indices2 = 0
-                            DO j = 1, n
-                               DO jj = 1, SIZE(M(i)%Loc2Glob_fa)
-                                  IF(M(it)%Loc2Glob_fa(indices(j)) .EQ. M(i)%Loc2Glob_fa(jj)) THEN
-                                     indices2(j) = jj
-                                     EXIT
-                                  ENDIF
-                               ENDDO
-                            ENDDO
-
-                            DO j = 1, n
-                               IF(indices2(j) .NE. 0) THEN
-                                  M(it)%GhostPro(j) = i
-                                  M(it)%GhostLoc(j) = indices2(j)
+                         ! ghost face -> division that assembles it, and its local index there
+                         DO j = 1, n
+                            gfa = M(it)%Loc2Glob_fa(indices(j))
+                            IF (gfa .LE. n_int_faces) THEN
+                               owner = MIN(part(intfaces_glob(gfa,1)), part(intfaces_glob(gfa,3)))
+                            ELSE
+                               owner = part(extfaces_glob(gfa-n_int_faces,1))
+                            ENDIF
+                            M(it)%GhostPro(j) = owner
+                            DO jj = 1, SIZE(M(owner)%Loc2Glob_fa)
+                               IF(M(owner)%Loc2Glob_fa(jj) .EQ. gfa) THEN
+                                  M(it)%GhostLoc(j) = jj
+                                  EXIT
                                ENDIF
                             ENDDO
-
+                            IF (M(it)%GhostLoc(j) .EQ. 0) THEN
+                               WRITE(*,*) "Domain decomposition: ghost face ", gfa, " not found in division ", owner, ". STOP."
+                               STOP
+                            ENDIF
                          ENDDO
                          DEALLOCATE(indices2)
                          DEALLOCATE(indices)
@@ -1139,29 +1133,21 @@ CONTAINS
                             ENDIF
                          ENDDO
 
-                         DO i = 1, nDiv
-                            IF(i .EQ. it) CYCLE
-
-                            indices2 = 0
-                            DO j = 1, n
-                               IF(indices(j) .NE. 0) THEN
-                                  DO jj = 1, SIZE(M(i)%Loc2Glob_el)
-                                     IF(M(it)%Loc2Glob_el(indices(j)) .EQ. M(i)%Loc2Glob_el(jj)) THEN
-                                        indices2(j) = jj
-                                        EXIT
-                                     ENDIF
-                                  ENDDO
+                         ! ghost element -> division that owns it, and its local index there
+                         DO j = 1, n
+                            iel = M(it)%Loc2Glob_el(indices(j))
+                            owner = part(iel)
+                            M(it)%GhelsPro(j) = owner
+                            DO jj = 1, SIZE(M(owner)%Loc2Glob_el)
+                               IF(M(owner)%Loc2Glob_el(jj) .EQ. iel) THEN
+                                  M(it)%GhelsLoc(j) = jj
+                                  EXIT
                                ENDIF
                             ENDDO
-
-                            DO j = 1, n
-                               IF(indices2(j) .NE. 0) THEN
-                                  M(it)%GhelsPro(j) = i
-                                  M(it)%GhelsLoc(j) = indices2(j)
-                               ENDIF
-                            ENDDO
-
-
+                            IF (M(it)%GhelsLoc(j) .EQ. 0) THEN
+                               WRITE(*,*) "Domain decomposition: ghost element ", iel, " not found in division ", owner, ". STOP."
+                               STOP
+                            ENDIF
                          ENDDO
                          DEALLOCATE(indices2)
                          DEALLOCATE(indices)
@@ -1255,6 +1241,7 @@ CONTAINS
                                DEALLOCATE(M(it)%loc2glob_el)
                             ENDDO
 
+                            DEALLOCATE(part)
                             NULLIFY(intfaces_glob, extfaces_glob, T, TTb, boundaryFlag, X)
 
 
@@ -1431,5 +1418,116 @@ CONTAINS
 #endif
 
                           ENDSUBROUTINE split_mesh
+
+  !> Partition the elements into npart parts by graph partitioning of the
+  !> element connectivity (dual graph: one vertex per element, one edge per
+  !> interior face) with SCOTCH. Computed on rank 0 and broadcast.
+  !> part(iel) in 1..npart on success; ok = .FALSE. if SCOTCH is not compiled
+  !> in (-DWITH_SCOTCH), fails, or leaves a part empty.
+  SUBROUTINE graph_partition(npart, nelems, intfaces, part, ok)
+    INTEGER, INTENT(IN)    :: npart, nelems
+    INTEGER, INTENT(IN)    :: intfaces(:,:)
+    INTEGER, INTENT(OUT)   :: part(nelems)
+    LOGICAL, INTENT(OUT)   :: ok
+#ifdef WITH_SCOTCH
+    INCLUDE 'scotchf.h'
+    DOUBLE PRECISION                     :: grafdat(SCOTCH_GRAPHDIM), stradat(SCOTCH_STRATDIM)
+    INTEGER(SCOTCH_NUMSIZE), ALLOCATABLE :: verttab(:), edgetab(:), parttab(:)
+    INTEGER(SCOTCH_NUMSIZE)              :: baseval, vertnbr, edgenbr, partnbr
+    INTEGER, ALLOCATABLE                 :: deg(:), pos(:), cnt(:)
+    INTEGER                              :: i, e1, e2, ierr, ncut
+    INTEGER                              :: mpierr
+#else
+    INTEGER                              :: mpierr
+#endif
+
+    part = 0
+    ok = .FALSE.
+#ifdef WITH_SCOTCH
+    IF (MPIvar%glob_id .EQ. 0) THEN
+       ! dual graph in compressed (CSR) form, base 1, no self loops
+       ALLOCATE(deg(nelems), pos(nelems))
+       deg = 0
+       DO i = 1, SIZE(intfaces,1)
+          e1 = intfaces(i,1)
+          e2 = intfaces(i,3)
+          IF (e1 .EQ. e2) CYCLE
+          deg(e1) = deg(e1) + 1
+          deg(e2) = deg(e2) + 1
+       ENDDO
+       ALLOCATE(verttab(nelems+1))
+       verttab(1) = 1
+       DO i = 1, nelems
+          verttab(i+1) = verttab(i) + deg(i)
+       ENDDO
+       edgenbr = verttab(nelems+1) - 1
+       ALLOCATE(edgetab(MAX(edgenbr,1)))
+       pos = INT(verttab(1:nelems))
+       DO i = 1, SIZE(intfaces,1)
+          e1 = intfaces(i,1)
+          e2 = intfaces(i,3)
+          IF (e1 .EQ. e2) CYCLE
+          edgetab(pos(e1)) = e2
+          pos(e1) = pos(e1) + 1
+          edgetab(pos(e2)) = e1
+          pos(e2) = pos(e2) + 1
+       ENDDO
+
+       baseval = 1
+       vertnbr = nelems
+       partnbr = npart
+       ALLOCATE(parttab(nelems))
+       parttab = -1
+
+       CALL SCOTCHFstratInit(stradat, ierr)
+       IF (ierr .EQ. 0) CALL SCOTCHFgraphInit(grafdat, ierr)
+       IF (ierr .EQ. 0) THEN
+          ! absent optional arrays are passed as verttab (vendtab: compact graph,
+          ! velotab, vlbltab) and edgetab (edlotab), see library_graph.c
+          CALL SCOTCHFgraphBuild(grafdat, baseval, vertnbr, verttab(1), verttab(2), &
+               verttab(1), verttab(1), edgenbr, edgetab(1), edgetab(1), ierr)
+          IF (ierr .EQ. 0) CALL SCOTCHFgraphCheck(grafdat, ierr)
+          IF (ierr .EQ. 0) CALL SCOTCHFgraphPart(grafdat, partnbr, stradat, parttab(1), ierr)
+          CALL SCOTCHFgraphExit(grafdat)
+       ENDIF
+       CALL SCOTCHFstratExit(stradat)
+
+       IF (ierr .EQ. 0) THEN
+          part = INT(parttab) + 1             ! SCOTCH parts are numbered from 0
+          ALLOCATE(cnt(npart))
+          cnt = 0
+          ok = ALL(part .GE. 1 .AND. part .LE. npart)
+          IF (ok) THEN
+             DO i = 1, nelems
+                cnt(part(i)) = cnt(part(i)) + 1
+             ENDDO
+             ok = ALL(cnt .GT. 0)
+          ENDIF
+          IF (ok) THEN
+             ncut = 0
+             DO i = 1, SIZE(intfaces,1)
+                IF (part(intfaces(i,1)) .NE. part(intfaces(i,3))) ncut = ncut + 1
+             ENDDO
+             WRITE(*,'(A,I6,A)') " SCOTCH graph partitioning into ", npart, " parts"
+             WRITE(*,'(A,I8,A,I8,A,F8.1)') "   elements per part: min ", MINVAL(cnt), &
+                  ", max ", MAXVAL(cnt), ", mean ", REAL(nelems)/REAL(npart)
+             WRITE(*,'(A,I8,A,I8,A)') "   interface faces: ", ncut, " (of ", SIZE(intfaces,1), " interior faces)"
+          ELSE
+             WRITE(*,*) "SCOTCH returned an invalid partition (empty part)."
+          ENDIF
+          DEALLOCATE(cnt)
+       ELSE
+          WRITE(*,*) "SCOTCH graph partitioning failed, error code ", ierr
+       ENDIF
+       DEALLOCATE(deg, pos, verttab, edgetab, parttab)
+    ENDIF
+#endif
+
+#ifdef PARALL
+    CALL MPI_Bcast(ok, 1, MPI_LOGICAL, 0, MPI_COMM_WORLD, mpierr)
+    IF (ok) CALL MPI_Bcast(part, nelems, MPI_INTEGER, 0, MPI_COMM_WORLD, mpierr)
+#endif
+    IF (.NOT. ok) part = 0
+  END SUBROUTINE graph_partition
 
                         ENDMODULE domain_decomposition_module

@@ -55,6 +55,27 @@ Omitting `petsc_factor_solver` retains PETSc's default factorization package.
 An explicit selection requires `PCLU` and an available backend in the loaded
 PETSc installation; unavailable backends stop the run instead of falling back.
 
+## Domain decomposition (MPI runs)
+
+The mesh is split between MPI processes either by graph partitioning of the
+element connectivity with SCOTCH (recommended) or by geometric strips (the
+former default, rotated by 5 degrees until a valid cut is found).
+
+Build with SCOTCH (sequential `libscotch`, same integer size as the build):
+
+```bash
+export MHDG_SCOTCH_DIR=/path/to/scotch     # contains include/scotchf.h and lib/libscotch.a
+make SCOTCH=yes
+```
+
+With `SCOTCH=yes` the graph partitioner is used by default; set
+`MHDG_PARTITIONER=strips` to use the strips instead (`mpirun -x MHDG_PARTITIONER ...`
+forwards it to all ranks). Without SCOTCH, or if partitioning fails, the strips
+are used. Rank 0 prints the number of elements per part and of interface faces.
+
+Each rank writes its decomposed mesh to `<mesh>_<rank>_<nprocs>.h5`; check it with
+`python tools/check_domain_decomposition.py "<mesh>_*_<nprocs>.h5"`.
+
 ## Regression testing
 
 The tracked regression harness supports external case bundles, isolated

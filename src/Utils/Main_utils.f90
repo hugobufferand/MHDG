@@ -949,7 +949,7 @@ CONTAINS
       CALL free_mesh_loc(Mesh_glob)
       CALL deep_copy_mesh_struct(Mesh, Mesh_glob)
       Mesh_glob%X = Mesh_glob%X*phys%lscale
-      CALL split_mesh(MPIvar%glob_size, 3 , .FALSE.)
+      CALL split_mesh(MPIvar%glob_size, default_partition_type(), .FALSE.)
       CALL mesh_preprocess(ierr)
 
       WRITE (nid, *) MPIvar%glob_id + 1
@@ -1141,7 +1141,7 @@ CONTAINS
     ENDIF
 
     ! Domain decomposition on the new mesh
-    CALL split_mesh(MPIvar%glob_size, 3, .FALSE.)
+    CALL split_mesh(MPIvar%glob_size, default_partition_type(), .FALSE.)
     CALL mesh_preprocess(ierr)
     Mesh%X = Mesh%X*phys%lscale
 

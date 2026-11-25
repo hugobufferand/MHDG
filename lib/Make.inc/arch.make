@@ -70,6 +70,10 @@ PSBLAS=$(LIB_NO)
 PSBLMG=$(LIB_NO)
 #PETSC=$(LIB_YES)
 PETSC ?= $(LIB_NO)
+# Graph partitioning of the mesh for the domain decomposition (MPI runs).
+# SCOTCH=yes needs MHDG_SCOTCH_DIR (with include/scotchf.h and lib/libscotch*);
+# without it the geometric strip decomposition is used.
+SCOTCH ?= $(LIB_NO)
 
 
 #-------------------------------------------------------------------------------
@@ -211,6 +215,9 @@ else ifeq ($(PSBLAS),$(LIB_YES))
  ADDMODSOLV+=solve_psblas.o
  ADDMOD+=solve_psblas.o
 endif
+ifeq ($(SCOTCH),$(LIB_YES))
+ MACROS+= -DWITH_SCOTCH
+endif
 
 #-------------------------------------------------------------------------------
 # MACROS FOR COMPILING OPTIONS
@@ -290,6 +297,11 @@ ifeq ($(PETSC),$(LIB_YES))
  FCFLAGS += $(shell $(MHDG_PKG_CONFIG) --cflags PETSc)
 endif
 
+# SCOTCH (domain decomposition)
+ifeq ($(SCOTCH),$(LIB_YES))
+ FCFLAGS += -I$(MHDG_SCOTCH_DIR)/include
+endif
+
 # MLD2P4
 ifeq ($(PSBLMG),$(LIB_YES))
  FCFLAGS += -I$(MHDG_MLD2P4_DIR)/modules/
@@ -346,6 +358,11 @@ endif
 #Local
 ifeq ($(PETSC),$(LIB_YES))
  LIB += $(shell $(MHDG_PKG_CONFIG) --libs PETSc)
+endif
+
+# SCOTCH (domain decomposition)
+ifeq ($(SCOTCH),$(LIB_YES))
+ LIB += -L$(MHDG_SCOTCH_DIR)/lib -lscotch -lscotcherr -lz -lm -lpthread
 endif
 
 
