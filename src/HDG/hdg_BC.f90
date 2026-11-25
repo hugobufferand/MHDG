@@ -1053,7 +1053,7 @@ CONTAINS
 
       NiNi = tensorProduct(refElPol%N1D(g,:),refElPol%N1D(g,:))*dline
       Ni = refElPol%N1D(g,:)*dline
-      CALL assembly_itercore_bc(iel,ind_asf,ind_ash,ind_ff,ind_fg,NiNi,Ni,b(g,1:2),n_g,tau_stab,diff_iso_fac(:,:,g),diff_ani_fac(:,:,g))
+      CALL assembly_itercore_bc(iel,ind_asf,ind_ash,ind_ff,ind_fg,NiNi,Ni,b(g,1:2),n_g,tau_stab,diff_iso_fac(:,:,g),diff_ani_fac(:,:,g),ufg(g,:))
     END DO
 
   END SUBROUTINE set_itercore_bc
@@ -1519,15 +1519,17 @@ CONTAINS
   !*********************************
   ! ITER core boundary condition
   !*********************************
-  SUBROUTINE assembly_itercore_bc(iel,ind_asf,ind_ash,ind_ff,ind_fg,NiNi,Ni,bg,ng,tau,diffiso,diffani)
+  SUBROUTINE assembly_itercore_bc(iel,ind_asf,ind_ash,ind_ff,ind_fg,NiNi,Ni,bg,ng,tau,diffiso,diffani,ufg)
       INTEGER*4    :: iel,ind_asf(:),ind_ash(:),ind_ff(:),ind_fg(:)
       REAL*8       :: NiNi(:,:),Ni(:),bg(:),ng(:)
       REAL*8       :: tau(:,:)
       REAL*8       :: diffiso(:,:),diffani(:,:)
+      REAL*8       :: ufg(:)
       REAL*8       :: bn
       INTEGER*4    :: i,j, idm
       INTEGER*4    :: indi(Npfl),indj(Npfl)
-      REAL*8       :: source_dens_coeff,source_ener_coeff
+      REAL*8       :: source_dens_coeff,source_ener_coeff,source_ener_coeff_e
+      REAL*8       :: kinetic
 
 
 #ifndef NEUTRAL
@@ -1539,12 +1541,18 @@ CONTAINS
       bn = dot_PRODUCT(bg,ng)
 
     source_dens_coeff = phys%part_source/simpar%refval_density/(Mesh%core_area*phys%lscale**2)/(simpar%refval_diffusion)*phys%lscale
-    source_ener_coeff = 0.5*phys%ener_source/simpar%refval_specenergydens/(Mesh%core_area*phys%lscale**2)/(simpar%refval_diffusion)*phys%lscale/simpar%refval_mass
+    source_ener_coeff = phys%core_power_ion_fraction*phys%ener_source/simpar%refval_specenergydens/(Mesh%core_area*phys%lscale**2)/(simpar%refval_diffusion)*phys%lscale/simpar%refval_mass
+    source_ener_coeff_e = (1.d0-phys%core_power_ion_fraction)*phys%ener_source/simpar%refval_specenergydens/(Mesh%core_area*phys%lscale**2)/(simpar%refval_diffusion)*phys%lscale/simpar%refval_mass
 
     ! *********** Equation 1 --> Flux plasma equal to flux neutrals + source
-    ! stabilization part
+    !              (or Dirichlet density: n_hat = core_density)
     i = 1
     indi = i + ind_asf
+    IF (phys%core_density_dirichlet) THEN
+      elMat%ALL(ind_ff(indi),ind_ff(indi),iel) = elMat%ALL(ind_ff(indi),ind_ff(indi),iel) - tau(i,i)*NiNi
+      elMat%fh(ind_ff(indi),iel) = elMat%fh(ind_ff(indi),iel) - tau(i,i)*phys%core_density/simpar%refval_density*Ni
+    ELSE
+    ! stabilization part
       elMat%ALL(ind_ff(indi),ind_ff(indi),iel) = elMat%ALL(ind_ff(indi),ind_ff(indi),iel) - tau(i,i)*NiNi
     elMat%Alu(ind_ff(indi),ind_fe(indi),iel) = elMat%Alu(ind_ff(indi),ind_fe(indi),iel) + tau(i,i)*NiNi
     ! flux diagonal part
@@ -1565,6 +1573,7 @@ CONTAINS
     END DO
     ! flux rhs-part
     elMat%fh(ind_ff(indi),iel) = elMat%fh(ind_ff(indi),iel) - source_dens_coeff*Ni
+    END IF
 
 
 
@@ -1587,6 +1596,15 @@ CONTAINS
     ! stabilization part
     i = 3
     indi = i + ind_asf
+    IF (phys%core_energy_dirichlet) THEN
+      ! u_3_hat = 3/2 Mref T n_hat (+ kinetic energy for ions, lagged)
+      kinetic = 0.5d0*ufg(2)**2/MAX(ufg(1),1.d-20)
+      indj = 1 + ind_asf
+      elMat%ALL(ind_ff(indi),ind_ff(indi),iel) = elMat%ALL(ind_ff(indi),ind_ff(indi),iel) - tau(i,i)*NiNi
+      elMat%ALL(ind_ff(indi),ind_ff(indj),iel) = elMat%ALL(ind_ff(indi),ind_ff(indj),iel) + &
+        &tau(i,i)*1.5d0*phys%Mref*phys%core_Ti/simpar%refval_temperature*NiNi
+      elMat%fh(ind_ff(indi),iel) = elMat%fh(ind_ff(indi),iel) - tau(i,i)*kinetic*Ni
+    ELSE
       elMat%ALL(ind_ff(indi),ind_ff(indi),iel) = elMat%ALL(ind_ff(indi),ind_ff(indi),iel) - tau(i,i)*NiNi
     elMat%Alu(ind_ff(indi),ind_fe(indi),iel) = elMat%Alu(ind_ff(indi),ind_fe(indi),iel) + tau(i,i)*NiNi
     ! flux diagonal part
@@ -1599,12 +1617,22 @@ CONTAINS
     END DO
     ! flux rhs-part
     elMat%fh(ind_ff(indi),iel) = elMat%fh(ind_ff(indi),iel) - source_ener_coeff*Ni
+    END IF
 
 
     ! *********** Equation 4 --> Electrons energy flux equal 10 MW
     ! stabilization part
     i = 4
     indi = i + ind_asf
+    IF (phys%core_energy_dirichlet) THEN
+      ! u_4_hat = 3/2 Mref Te n_hat
+      kinetic = 0.d0
+      indj = 1 + ind_asf
+      elMat%ALL(ind_ff(indi),ind_ff(indi),iel) = elMat%ALL(ind_ff(indi),ind_ff(indi),iel) - tau(i,i)*NiNi
+      elMat%ALL(ind_ff(indi),ind_ff(indj),iel) = elMat%ALL(ind_ff(indi),ind_ff(indj),iel) + &
+        &tau(i,i)*1.5d0*phys%Mref*phys%core_Te/simpar%refval_temperature*NiNi
+      elMat%fh(ind_ff(indi),iel) = elMat%fh(ind_ff(indi),iel) - tau(i,i)*kinetic*Ni
+    ELSE
       elMat%ALL(ind_ff(indi),ind_ff(indi),iel) = elMat%ALL(ind_ff(indi),ind_ff(indi),iel) - tau(i,i)*NiNi
     elMat%Alu(ind_ff(indi),ind_fe(indi),iel) = elMat%Alu(ind_ff(indi),ind_fe(indi),iel) + tau(i,i)*NiNi
     ! flux diagonal part
@@ -1616,7 +1644,8 @@ CONTAINS
       elMat%Alq(ind_ff(indi),ind_fG(indj),iel) = elMat%Alq(ind_ff(indi),ind_fG(indj),iel) - NiNi*(ng(idm)*diffiso(i,i)-bn*bg(idm)*diffani(i,i))
     END DO
     ! flux rhs-part
-    elMat%fh(ind_ff(indi),iel) = elMat%fh(ind_ff(indi),iel) - source_ener_coeff*Ni
+    elMat%fh(ind_ff(indi),iel) = elMat%fh(ind_ff(indi),iel) - source_ener_coeff_e*Ni
+    END IF
 #endif
 
 

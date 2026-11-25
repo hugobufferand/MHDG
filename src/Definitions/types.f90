@@ -324,6 +324,11 @@ MODULE types
      REAL*8                    :: cryopump_power ! Cryopump power in [m^3/s] coefficient
      REAL*8                    :: part_source ! Particle source for ITER
      REAL*8                    :: ener_source ! Particle source for ITER
+     LOGICAL                   :: core_density_dirichlet ! bc 6: Dirichlet density instead of particle flux
+     LOGICAL                   :: core_energy_dirichlet  ! bc 6: Dirichlet Ti, Te instead of power flux
+     REAL*8                    :: core_density ! bc 6 Dirichlet density [m^-3]
+     REAL*8                    :: core_Ti, core_Te ! bc 6 Dirichlet temperatures [eV]
+     REAL*8                    :: core_power_ion_fraction ! bc 6 fraction of ener_source given to ions
      REAL*8                    :: density_source ! Density source for WEST (2D, case 52)
      REAL*8                    :: ener_source_e ! Ion energy source for WEST and ITER (2D, case 52 and 81)
      REAL*8                    :: ener_source_ee ! Electron source for WEST and ITER (2D, case 52 and 81)
