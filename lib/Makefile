@@ -354,6 +354,10 @@ solve_petsc.F : $(SDIR)/LinearAlgebra/solve_petsc.f90
 
 solve_petsc.o : solve_petsc.F matrices_types.o matrices_tools.o globals.o types.o initialization.o
 	$(FC) -c $(FCFLAGS) $(INC)  $< -o $@
+
+# C wrapper of MatGetFactorAvailable (no Fortran binding in some PETSc versions)
+matfactoravailablef.o : $(SDIR)/LinearAlgebra/matfactoravailablef.c
+	$(MHDG_CC) -c -O2 $(PETSC_CFLAGS) $< -o $@
 endif
 
 ifeq ($(PSBLMG),$(LIB_YES))

@@ -25,6 +25,8 @@ MODE ?= $(MODE_SERIAL)
 # The compiler
 #-------------------------------------------------------------------------------
 FC = mpifort
+# C compiler for the C wrappers (e.g. matfactoravailablef.c)
+MHDG_CC ?= mpicc
 
 #-------------------------------------------------------------------------------
 # Model
@@ -205,6 +207,7 @@ ifeq ($(PETSC),$(LIB_YES))
  MACROS+= -DWITH_PETSC
  ADDMODSOLV+=solve_petsc.o
  ADDMOD+=solve_petsc.o
+ ADDMOD+=matfactoravailablef.o
 endif
 ifeq ($(PSBLMG),$(LIB_YES))
  MACROS+= -DWITH_PSBLAS
@@ -295,6 +298,7 @@ endif
 # PETSC
 ifeq ($(PETSC),$(LIB_YES))
  FCFLAGS += $(shell $(MHDG_PKG_CONFIG) --cflags PETSc)
+ PETSC_CFLAGS = $(shell $(MHDG_PKG_CONFIG) --cflags PETSc)
 endif
 
 # SCOTCH (domain decomposition)
