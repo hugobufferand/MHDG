@@ -172,6 +172,22 @@ conflicting values are rejected. Supplying `t_final` or a nonzero `t_start`
 without an explicit mode is rejected rather than silently ignored. The new
 configuration adds no `max_steps` setting.
 
+### Core boundary condition (`bcflags = 6`)
+
+Set the `bcflags` entry of the core boundary (gmsh physical group `IN`, flag 8) to 6
+to choose, in `PHYS_LST`, what is imposed on the core interface:
+
+| Parameter | Values | Meaning |
+| --- | --- | --- |
+| `core_density_bc` | `'flux'` (default) / `'dirichlet'` | particle flux `part_source` [particles/s] or density `core_density` [m^-3] |
+| `core_energy_bc` | `'power'` (default) / `'dirichlet'` | power `ener_source` [W] or temperatures `core_Ti`, `core_Te` [eV] |
+| `core_power_ion_fraction` | 0–1, default 0.5 | share of `ener_source` given to the ions |
+
+The flux and power are spread uniformly over the core area. The defaults reproduce
+the previous behaviour. Dirichlet values are imposed weakly on the face trace; with
+Dirichlet temperatures, the ion and electron energies follow the face density.
+The settings are saved in `simulation_parameters/physics` of the solution files.
+
 ## Running 
 The pipeline to get solution for a case without meshadaptivity and in serial is described in [demo](https://github.com/wave46/HDG_postprocess/blob/main/demos/hdg_solution_basics_neutrals.ipynb)
 First, go to `test` folder, where executable is. It is convinient to create `Meshes` folder and put your mesh there.

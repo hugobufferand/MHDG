@@ -61,6 +61,8 @@ SUBROUTINE READ_input()
   REAL*8, PARAMETER     :: heating_ion_fraction_unset = -HUGE(1.d0)
   REAL*8                :: heating_ion_fraction
   INTEGER               :: heating_equation
+  CHARACTER(len=20)     :: core_density_bc, core_energy_bc
+  REAL*8                :: core_density, core_Ti, core_Te, core_power_ion_fraction
   REAL*8                :: exbdump, part_source,ener_source, density_source, ener_source_e, ener_source_ee, sigma_source, fluxg_trunc
 
   ! Info for input and output
@@ -135,14 +137,16 @@ SUBROUTINE READ_input()
     &bohm_energy_thresh,Gmbohm, Gmbohme, a, Mref, tie, diff_pari, diff_pare, diff_pot, epn, etapar, Potfloat,diagsource, c_fli, c_fle, T_fluxlim_maxi, T_fluxlim_maxe,&
     &neutral_flux_limiter_mode,neutral_flux_limiter_tn_source,neutral_flux_limiter_tn_eV,&
     &neutral_flux_limiter_eps,neutral_flux_limiter_fs_fraction,neutral_flux_limiter_fs_flux_min,&
-    &ionization_ion_energy_fraction, heating_ion_fraction
+    &ionization_ion_energy_fraction, heating_ion_fraction,&
+    &core_density_bc, core_energy_bc, core_density, core_Ti, core_Te, core_power_ion_fraction
 #else
   NAMELIST /PHYS_LST/ diff_n, diff_u, diff_e, diff_ee, diff_vort, diff_nn,diff_nn_min,neutralp_ti_supp_eV,I_0,heating_power, heating_dr,heating_dz,heating_sigmar,heating_sigmaz,heating_equation, Re, Re_pump, Re_n, Re_n_pump, apply_trim, puff,feedback_propotional_gain,feedback_integral_gain,feedback_derivative_gain,feedback_propotional_gain_xpr, feedback_integral_gain_xpr, feedback_derivative_gain_xpr,cryopump_power,puff_slope, density_source, ener_source_e, ener_source_ee, sigma_source, fluxg_trunc, part_source,ener_source,&
   & diff_k_min, diff_k_max, k_max, Zeff,Pohmic, Tbg, bcflags, bohmth,&
     &bohm_energy_thresh,Gmbohm, Gmbohme, a, Mref, tie, diff_pari, diff_pare, diff_pot, epn, etapar, Potfloat,diagsource, c_fli, c_fle, T_fluxlim_maxi, T_fluxlim_maxe,&
     &neutral_flux_limiter_mode,neutral_flux_limiter_tn_source,neutral_flux_limiter_tn_eV,&
     &neutral_flux_limiter_eps,neutral_flux_limiter_fs_fraction,neutral_flux_limiter_fs_flux_min,&
-    &ionization_ion_energy_fraction, heating_ion_fraction
+    &ionization_ion_energy_fraction, heating_ion_fraction,&
+    &core_density_bc, core_energy_bc, core_density, core_Ti, core_Te, core_power_ion_fraction
 #endif
   NAMELIST /UTILS_LST/ PRINTint, dotiming, freqdisp, freqsave, balance_diagnostics_mode
   NAMELIST /LSSOLV_LST/ sollib, lstiming, kspitrace, rtol, atol, kspitmax, igz, rprecond,Nrprecond, kspnorm, kspmethd, pctype, gmresres,mglevels, mgtypeform,itmax, itrace, rest, istop, tol, kmethd, ptype,&
@@ -182,6 +186,12 @@ SUBROUTINE READ_input()
   neutralp_ti_supp_eV = 1.d-6
   ionization_ion_energy_fraction = 0.d0
   heating_power = 0.d0
+  core_density_bc = 'flux'
+  core_energy_bc = 'power'
+  core_density = 1.d19
+  core_Ti = 100.d0
+  core_Te = 100.d0
+  core_power_ion_fraction = 0.5d0
   heating_dr = 0.d0
   heating_dz = 0.d0
   heating_sigmar = 0.d0
@@ -619,6 +629,36 @@ SUBROUTINE READ_input()
   phys%fluxg_trunc        = fluxg_trunc
   phys%part_source        = part_source
   phys%ener_source        = ener_source
+  SELECT CASE (TRIM(ADJUSTL(core_density_bc)))
+  CASE ('flux')
+     phys%core_density_dirichlet = .FALSE.
+  CASE ('dirichlet')
+     phys%core_density_dirichlet = .TRUE.
+  CASE DEFAULT
+     PRINT *, "core_density_bc must be 'flux' or 'dirichlet': ", TRIM(core_density_bc)
+     STOP 1
+  END SELECT
+  SELECT CASE (TRIM(ADJUSTL(core_energy_bc)))
+  CASE ('power')
+     phys%core_energy_dirichlet = .FALSE.
+  CASE ('dirichlet')
+     phys%core_energy_dirichlet = .TRUE.
+  CASE DEFAULT
+     PRINT *, "core_energy_bc must be 'power' or 'dirichlet': ", TRIM(core_energy_bc)
+     STOP 1
+  END SELECT
+  IF (core_density <= 0.d0 .OR. core_Ti <= 0.d0 .OR. core_Te <= 0.d0) THEN
+     PRINT *, 'core_density, core_Ti and core_Te must be positive'
+     STOP 1
+  ENDIF
+  IF (core_power_ion_fraction < 0.d0 .OR. core_power_ion_fraction > 1.d0) THEN
+     PRINT *, 'core_power_ion_fraction must be in [0,1]: ', core_power_ion_fraction
+     STOP 1
+  ENDIF
+  phys%core_density       = core_density
+  phys%core_Ti            = core_Ti
+  phys%core_Te            = core_Te
+  phys%core_power_ion_fraction = core_power_ion_fraction
   phys%Zeff               = Zeff
   phys%Pohmic             = Pohmic
   phys%Tbg                = Tbg
@@ -876,6 +916,15 @@ SUBROUTINE READ_input()
      ENDIF
      PRINT *, '                - particle source at core:                            ', part_source
      PRINT *, '                - energy source at core:                              ', ener_source
+     PRINT *, '                - core density bc (bc 6):                             ', TRIM(core_density_bc)
+     IF (phys%core_density_dirichlet) &
+          PRINT *, '                - core density [m^-3]:                                ', core_density
+     PRINT *, '                - core energy bc (bc 6):                              ', TRIM(core_energy_bc)
+     IF (phys%core_energy_dirichlet) THEN
+        PRINT *, '                - core Ti, Te [eV]:                                   ', core_Ti, core_Te
+     ELSE
+        PRINT *, '                - core power ion fraction:                            ', core_power_ion_fraction
+     ENDIF
 #endif
 #ifdef KEQUATION
      PRINT *, '                - minimum perp diffusion in the k equation:           ', phys%diff_k_min
