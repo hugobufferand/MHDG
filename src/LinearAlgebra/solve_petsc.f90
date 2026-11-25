@@ -285,7 +285,11 @@ CONTAINS
     !PetscDraw             :: draw
     KSPType               :: ksp_type
     PCType                :: pc_type
-    PetscBool             :: factor_available
+    INTEGER               :: factor_available   ! 1 if the requested LU package is available
+    ! C wrapper of MatGetFactorAvailable (matfactoravailablef.c): some PETSc
+    ! installations lack its Fortran binding. Implicit interface on purpose, so
+    ! that it does not depend on how a PETSc version declares Mat or MatFactorType.
+    EXTERNAL              :: matgetfactoravailable_wrapper
     PetscViewerAndFormat  :: vf
     PetscErrorCode        :: ierr
 
@@ -326,10 +330,10 @@ CONTAINS
     CHKERRA(ierr)
     IF (LEN_TRIM(lssolver%petsc_factor_solver) > 0) THEN
        ! Select the requested LU package before PCSetUp; never silently fall back.
-       CALL MatGetFactorAvailable(matPETSC%matK, TRIM(lssolver%petsc_factor_solver), &
+       CALL matgetfactoravailable_wrapper(matPETSC%matK, TRIM(lssolver%petsc_factor_solver), &
             MAT_FACTOR_LU, factor_available, ierr)
        CHKERRA(ierr)
-       IF (.NOT. factor_available) THEN
+       IF (factor_available .EQ. 0) THEN
           IF (MPIvar%glob_id == 0) PRINT *, 'PETSc LU factorization backend unavailable: ', TRIM(lssolver%petsc_factor_solver)
           CALL MPI_Abort(PETSC_COMM_WORLD, 1, ierr)
        ENDIF
