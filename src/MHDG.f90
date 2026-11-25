@@ -229,6 +229,16 @@ PROGRAM MHDG
               CALL setSolName(save_name, mesh_name, it, .TRUE., .TRUE.)
               CALL HDF5_save_solution(save_name)
 
+              ! Converged at the minimum diffusion: the ramp is complete
+              IF (phys%diff_n .LE. switch%diffmin*(1.d0 + 1.d-10)) THEN
+                 IF (MPIvar%glob_id .EQ. 0) THEN
+                    WRITE (6, *) "**********************************************"
+                    WRITE (6, *) "Minimum diffusion reached: diffusion ramp done"
+                    WRITE (6, *) "**********************************************"
+                 END IF
+                 EXIT
+              END IF
+
               ! reduce diffusion
               CALL reduce_diffusion()
 

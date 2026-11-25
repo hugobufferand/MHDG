@@ -1970,29 +1970,33 @@ ENDSUBROUTINE update_delta_te
   END SUBROUTINE project_saved_history
 
   SUBROUTINE reduce_diffusion()
-    ! Update the diffusion, the elemental matrices and the solution
+    ! Update the diffusion, the elemental matrices and the solution.
+    ! The last reduction stops exactly at diffmin (all coefficients keep their ratios).
+    REAL*8 :: factor
+    factor = switch%diffred
+    IF (switch%diffmin > 0.d0 .AND. phys%diff_n*factor < switch%diffmin) factor = switch%diffmin/phys%diff_n
     IF (MPIvar%glob_id .EQ. 0) THEN
        WRITE (6, *) "************************************************"
-       WRITE (6, *) "Reducing diffusion: ", phys%diff_n*switch%diffred*simpar%refval_diffusion
+       WRITE (6, *) "Reducing diffusion: ", phys%diff_n*factor*simpar%refval_diffusion
 
 #ifdef KEQUATION
-       WRITE (6, *) "K diffusion min: ", phys%diff_k_min*switch%diffred*simpar%refval_diffusion
+       WRITE (6, *) "K diffusion min: ", phys%diff_k_min*factor*simpar%refval_diffusion
 #endif
        WRITE (6, *) "************************************************"
     END IF
-    phys%diff_n = phys%diff_n*switch%diffred
-    phys%diff_u = phys%diff_u*switch%diffred
+    phys%diff_n = phys%diff_n*factor
+    phys%diff_u = phys%diff_u*factor
 #ifdef TEMPERATURE
-    phys%diff_e = phys%diff_e*switch%diffred
-    phys%diff_ee = phys%diff_ee*switch%diffred
+    phys%diff_e = phys%diff_e*factor
+    phys%diff_ee = phys%diff_ee*factor
 #endif
 #ifdef VORTICITY
-    phys%diff_vort = phys%diff_vort*switch%diffred
-    phys%diff_pot = phys%diff_pot*switch%diffred
+    phys%diff_vort = phys%diff_vort*factor
+    phys%diff_pot = phys%diff_pot*factor
 #endif
 #ifdef KEQUATION
-    phys%diff_k_min = phys%diff_k_min*switch%diffred
-    phys%diff_k_max = phys%diff_k_max!*switch%diffred
+    phys%diff_k_min = phys%diff_k_min*factor
+    phys%diff_k_max = phys%diff_k_max!*factor
 #endif
   ENDSUBROUTINE reduce_diffusion
 
