@@ -809,8 +809,10 @@ CONTAINS
                 ghostFaces  = 0
                 extfaces    = M(it)%extfaces_loc
 
-                ALLOCATE(T_con(SIZE(Tp,1),SIZE(refElPol%Face_nodes,2)))
-                ALLOCATE(flipFace(SIZE(Tp,1)))
+                ! one row per border face of the local mesh: bounded by the external faces,
+                ! not by the elements (small partitions have more border faces than elements)
+                ALLOCATE(T_con(SIZE(extFaces,1),SIZE(refElPol%Face_nodes,2)))
+                ALLOCATE(flipFace(SIZE(extFaces,1)))
                 ALLOCATE(mapextf(SIZE(extFaces,1)))
 
                 T_con = 0
